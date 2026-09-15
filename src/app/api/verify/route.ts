@@ -1,11 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { getServiceSupabase, STORAGE_BUCKET, isSupabaseConfigured } from "@/lib/supabase";
-import { checkRateLimit, recordFailedAttempt, resetRateLimit } from "@/lib/rate-limit";
+import { checkPasswordRateLimit, resetRateLimit } from "@/lib/rate-limit";
+import { getClientIp, validateSameOrigin } from "@/lib/security";
 import { VerifyResponse } from "@/lib/types";
 
 export async function POST(req: NextRequest): Promise<NextResponse<VerifyResponse>> {
   try {
+    // 1. CSRF Same-Origin Validation
+    if (!validateSameOrigin(req)) {
+      return NextResponse.json(
+        { success: false, error: "Cross-origin requests are forbidden." },
+        { status: 403 }
+      );
+    }
+
     if (!isSupabaseConfigured()) {
       return NextResponse.json(
         { success: false, error: "Supabase is not configured." },
@@ -38,13 +47,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
       );
     }
 
-    // Determine client IP for rate limiting
-    const forwarded = req.headers.get("x-forwarded-for");
-    const ip = forwarded ? forwarded.split(",")[0].trim() : req.headers.get("x-real-ip") || "unknown-client";
-    const rateLimitKey = `${ip}:${code}`;
+    // 2. Distributed Database-Backed Rate Limiting (Synchronized across all serverless lambdas)
+    const clientIp = getClientIp(req);
+    const rateLimitKey = `pwd:${clientIp}:${code}`;
+    const rateStatus = await checkPasswordRateLimit(clientIp, code);
 
-    // Check rate limit
-    const rateStatus = checkRateLimit(rateLimitKey);
     if (!rateStatus.allowed) {
       return NextResponse.json(
         {
@@ -77,7 +84,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
     const now = Date.now();
 
     if (expiresAt < now) {
-      // Purge expired file immediately from storage & database
+      // Purge expired file immediately
       await Promise.allSettled([
         supabase.storage.from(STORAGE_BUCKET).remove([fileRecord.file_path]),
         supabase.from("files").delete().eq("id", fileRecord.id),
@@ -96,23 +103,23 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
     const isPasswordValid = await bcrypt.compare(password, fileRecord.password_hash);
 
     if (!isPasswordValid) {
-      const attemptResult = recordFailedAttempt(rateLimitKey);
-      const remainingMsg = attemptResult.remainingAttempts > 0
-        ? ` (${attemptResult.remainingAttempts} attempt${attemptResult.remainingAttempts === 1 ? "" : "s"} left)`
-        : " (Account locked for 10 minutes)";
+      const remainingMsg =
+        rateStatus.remainingAttempts > 0
+          ? ` (${rateStatus.remainingAttempts} attempt${rateStatus.remainingAttempts === 1 ? "" : "s"} left)`
+          : " (Account locked for 10 minutes)";
 
       return NextResponse.json(
         {
           success: false,
           error: `Incorrect password.${remainingMsg}`,
-          remainingAttempts: attemptResult.remainingAttempts,
+          remainingAttempts: rateStatus.remainingAttempts,
         },
         { status: 401 }
       );
     }
 
-    // Password is valid: reset rate limit tracking for this identifier
-    resetRateLimit(rateLimitKey);
+    // Password is valid: reset rate limit tracking for this IP + code
+    await resetRateLimit(rateLimitKey);
 
     // Generate secure temporary signed URL (valid for 60 seconds)
     const { data: signedData, error: signError } = await supabase.storage
@@ -129,7 +136,6 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
       );
     }
 
-    // Return the revealed filename and file manifest only after successful password verification
     return NextResponse.json({
       success: true,
       signedUrl: signedData.signedUrl,

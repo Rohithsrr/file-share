@@ -1,9 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase, STORAGE_BUCKET, isSupabaseConfigured } from "@/lib/supabase";
 import { CheckCodeResponse } from "@/lib/types";
+import { checkCodeLookupRateLimit } from "@/lib/rate-limit";
+import { getClientIp } from "@/lib/security";
 
 export async function GET(req: NextRequest): Promise<NextResponse<CheckCodeResponse>> {
   try {
+    // 1. Anti-Enumeration Rate Limiting (Protects 6-character code space against brute-force scanners)
+    const clientIp = getClientIp(req);
+    const rateStatus = await checkCodeLookupRateLimit(clientIp);
+
+    if (!rateStatus.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Too many code lookup requests. Potential automated scan detected. Please wait ${rateStatus.retryAfterSeconds} seconds.`,
+        },
+        { status: 429 }
+      );
+    }
+
     if (!isSupabaseConfigured()) {
       return NextResponse.json(
         { success: false, error: "Supabase is not configured." },
@@ -23,7 +39,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<CheckCodeRespo
 
     const supabase = getServiceSupabase();
 
-    // Query file record - notice original_filename is NOT returned to the client!
+    // Query file record - original_filename is strictly suppressed
     const { data, error } = await supabase
       .from("files")
       .select("id, file_path, file_size, is_archive, file_count, expires_at")
@@ -42,7 +58,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<CheckCodeRespo
     const now = Date.now();
 
     if (expiresAt < now) {
-      // Automatic on-access purge: delete from storage and database
+      // Automatic on-access purge
       await Promise.allSettled([
         supabase.storage.from(STORAGE_BUCKET).remove([data.file_path]),
         supabase.from("files").delete().eq("id", data.id),
@@ -58,7 +74,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<CheckCodeRespo
       );
     }
 
-    // Return size, file count, and expiry — keeping file names strictly confidential until password is verified
+    // Return size, count, and expiry — preserving confidentiality
     return NextResponse.json({
       success: true,
       size: data.file_size,

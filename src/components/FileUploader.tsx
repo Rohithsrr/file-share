@@ -176,6 +176,16 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
       return;
     }
 
+    const BLOCKED_EXTENSIONS = new Set(["exe", "bat", "cmd", "sh", "bash", "vbs", "scr", "msi", "ps1", "dll", "com", "hta", "jar"]);
+    for (const item of items) {
+      const parts = item.file.name.toLowerCase().split(".");
+      const ext = parts.length > 1 ? parts[parts.length - 1].trim() : "";
+      if (BLOCKED_EXTENSIONS.has(ext)) {
+        setErrorMessage(`Security Policy: Executable file "${item.file.name}" is blocked. Executables and scripts cannot be uploaded.`);
+        return;
+      }
+    }
+
     setSelectedItems(items);
     setIsFolder(folderMode);
     setFolderName(folderNameStr);

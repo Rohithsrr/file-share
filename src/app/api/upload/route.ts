@@ -3,14 +3,42 @@ import bcrypt from "bcryptjs";
 import { getServiceSupabase, STORAGE_BUCKET, isSupabaseConfigured } from "@/lib/supabase";
 import { generateShareCode, isValidShareCode, sanitizeFilename } from "@/lib/utils";
 import { UploadResponse, FileManifestItem } from "@/lib/types";
+import { checkUploadRateLimit } from "@/lib/rate-limit";
+import {
+  isDangerousExtension,
+  validateArchiveManifest,
+  getClientIp,
+  validateSameOrigin,
+} from "@/lib/security";
 
 // Maximum single upload file size: 50MB (Supabase Free Tier standard limit)
 const MAX_SINGLE_UPLOAD_BYTES = 50 * 1024 * 1024;
-// Maximum total active storage on Supabase free tier: 950MB (leaving safe headroom below 1GB)
+// Maximum total active storage on Supabase free tier: 950MB (safe headroom below 1GB)
 const MAX_FREE_TIER_STORAGE_BYTES = 950 * 1024 * 1024;
 
 export async function POST(req: NextRequest): Promise<NextResponse<UploadResponse>> {
   try {
+    // 1. CSRF Same-Origin Validation
+    if (!validateSameOrigin(req)) {
+      return NextResponse.json(
+        { success: false, error: "Cross-origin requests are forbidden." },
+        { status: 403 }
+      );
+    }
+
+    // 2. Client IP Rate Limiting (Anti-DoS / Upload Spam Prevention)
+    const clientIp = getClientIp(req);
+    const rateLimit = await checkUploadRateLimit(clientIp);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Upload rate limit exceeded. To protect free cloud resources, please wait ${rateLimit.retryAfterSeconds} seconds before uploading another file.`,
+        },
+        { status: 429 }
+      );
+    }
+
     if (!isSupabaseConfigured()) {
       return NextResponse.json(
         {
@@ -39,7 +67,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       }
     }
 
-    // Validate file
+    // 3. File Validation
     if (!file || file.size === 0) {
       return NextResponse.json(
         { success: false, error: "Please select a valid file or folder to upload." },
@@ -57,7 +85,29 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       );
     }
 
-    // Validate password
+    // 4. Dangerous Extension & Malware Staging Filter
+    if (isDangerousExtension(file.name)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Executable files, scripts, and installer binaries are blocked to prevent malware distribution.",
+        },
+        { status: 400 }
+      );
+    }
+
+    // 5. Zip-Bomb & Decompression Protection
+    if (isArchive && filesManifest.length > 0) {
+      const archiveCheck = validateArchiveManifest(filesManifest, file.size);
+      if (!archiveCheck.valid) {
+        return NextResponse.json(
+          { success: false, error: archiveCheck.reason },
+          { status: 400 }
+        );
+      }
+    }
+
+    // 6. Strong Password Validation
     if (!password || password.length < 4) {
       return NextResponse.json(
         { success: false, error: "A password with at least 4 characters is required to protect your file." },
@@ -68,7 +118,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
     const supabase = getServiceSupabase();
     const nowIso = new Date().toISOString();
 
-    // 1. Opportunistic Free-Tier Cleanup: Purge expired files from DB & storage
+    // 7. Opportunistic Free-Tier Cleanup
     try {
       const { data: expired } = await supabase
         .from("files")
@@ -84,10 +134,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
         ]);
       }
     } catch {
-      // Non-blocking cleanup attempt
+      // Non-blocking cleanup
     }
 
-    // 2. Check Free Tier Cloud Storage Availability
+    // 8. Storage Capacity Check
     const { data: activeFiles } = await supabase
       .from("files")
       .select("file_size")
@@ -109,7 +159,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       );
     }
 
-    // Determine expiration (default 5 minutes as requested)
+    // Expiration duration (default 5 minutes)
     let durationMinutes = 5;
     if (durationMinutesRaw) {
       const parsed = parseInt(durationMinutesRaw, 10);
@@ -119,7 +169,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
     }
     const expiresAt = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
 
-    // Determine share code (custom or auto-generated)
+    // Determine share code
     let shareCode: string;
     if (customCode) {
       const normalizedCode = customCode.toUpperCase();
@@ -170,20 +220,33 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       shareCode = uniqueCode;
     }
 
-    // Hash password server-side with bcrypt (salt rounds = 10)
+    // 9. Bcrypt password hashing (10 salt rounds)
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    // Construct storage path
+    // 10. Sanitize filename and storage path
     const safeFilename = sanitizeFilename(file.name);
     const storagePath = `${shareCode}/${Date.now()}_${safeFilename}`;
 
-    // Upload file buffer to Supabase Storage private bucket
+    // Force application/octet-stream for potentially scriptable formats to neutralize XSS
+    let safeMimeType = file.type || "application/octet-stream";
+    const lowerName = file.name.toLowerCase();
+    if (
+      lowerName.endsWith(".html") ||
+      lowerName.endsWith(".htm") ||
+      lowerName.endsWith(".svg") ||
+      lowerName.endsWith(".xml") ||
+      lowerName.endsWith(".xhtml")
+    ) {
+      safeMimeType = "application/octet-stream";
+    }
+
+    // Upload to Supabase private storage
     const fileBuffer = Buffer.from(await file.arrayBuffer());
     const { error: storageError } = await supabase.storage
       .from(STORAGE_BUCKET)
       .upload(storagePath, fileBuffer, {
-        contentType: file.type || "application/octet-stream",
+        contentType: safeMimeType,
         upsert: false,
       });
 
@@ -195,13 +258,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       );
     }
 
-    // Store metadata in Postgres `files` table
+    // Insert metadata record
     const { error: dbError } = await supabase.from("files").insert({
       share_code: shareCode,
       file_path: storagePath,
       original_filename: file.name,
       file_size: file.size,
-      mime_type: file.type || "application/octet-stream",
+      mime_type: safeMimeType,
       password_hash: passwordHash,
       is_archive: isArchive,
       file_count: fileCount,
@@ -218,7 +281,6 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       );
     }
 
-    // Construct download URL
     const host = req.headers.get("host") || "localhost:3000";
     const protocol = host.includes("localhost") ? "http" : "https";
     const downloadUrl = `${protocol}://${host}/download?code=${shareCode}`;

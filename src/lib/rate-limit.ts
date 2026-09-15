@@ -1,30 +1,4 @@
-interface RateLimitRecord {
-  attempts: number;
-  firstAttemptTime: number;
-  lastAttemptTime: number;
-  lockedUntil?: number;
-}
-
-// In-memory cache for IP + code brute-force protection
-const rateLimitMap = new Map<string, RateLimitRecord>();
-
-// Configuration: max 5 failed attempts within a 5-minute window (300,000 ms)
-const MAX_ATTEMPTS = 5;
-const WINDOW_MS = 5 * 60 * 1000;
-const LOCKOUT_MS = 10 * 60 * 1000; // 10-minute lockout on exceeding
-
-// Clean up stale entries periodically
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, record] of rateLimitMap.entries()) {
-    if (record.lockedUntil && record.lockedUntil > now) {
-      continue;
-    }
-    if (now - record.lastAttemptTime > WINDOW_MS) {
-      rateLimitMap.delete(key);
-    }
-  }
-}, 60 * 1000);
+import { getServiceSupabase, isSupabaseConfigured } from "./supabase";
 
 export interface RateLimitResult {
   allowed: boolean;
@@ -32,87 +6,136 @@ export interface RateLimitResult {
   retryAfterSeconds?: number;
 }
 
-export function checkRateLimit(identifier: string): RateLimitResult {
+// In-memory fallback in case of database unavailability
+const fallbackMemoryMap = new Map<
+  string,
+  { attempts: number; firstTime: number; lockedUntil?: number }
+>();
+
+function fallbackRateLimit(
+  key: string,
+  maxAttempts: number,
+  windowSeconds: number,
+  lockoutSeconds: number
+): RateLimitResult {
   const now = Date.now();
-  const record = rateLimitMap.get(identifier);
+  const rec = fallbackMemoryMap.get(key);
 
-  if (!record) {
-    return {
-      allowed: true,
-      remainingAttempts: MAX_ATTEMPTS,
-    };
+  if (!rec) {
+    fallbackMemoryMap.set(key, { attempts: 1, firstTime: now });
+    return { allowed: true, remainingAttempts: maxAttempts - 1 };
   }
 
-  // Check if actively locked out
-  if (record.lockedUntil && record.lockedUntil > now) {
-    const retryAfterSeconds = Math.ceil((record.lockedUntil - now) / 1000);
+  if (rec.lockedUntil && rec.lockedUntil > now) {
     return {
       allowed: false,
       remainingAttempts: 0,
-      retryAfterSeconds,
+      retryAfterSeconds: Math.ceil((rec.lockedUntil - now) / 1000),
     };
   }
 
-  // Check if the rolling window has expired
-  if (now - record.firstAttemptTime > WINDOW_MS) {
-    rateLimitMap.delete(identifier);
-    return {
-      allowed: true,
-      remainingAttempts: MAX_ATTEMPTS,
-    };
+  if (now - rec.firstTime > windowSeconds * 1000) {
+    fallbackMemoryMap.set(key, { attempts: 1, firstTime: now });
+    return { allowed: true, remainingAttempts: maxAttempts - 1 };
   }
 
-  // Check attempts count
-  if (record.attempts >= MAX_ATTEMPTS) {
-    record.lockedUntil = now + LOCKOUT_MS;
-    const retryAfterSeconds = Math.ceil(LOCKOUT_MS / 1000);
+  rec.attempts += 1;
+  if (rec.attempts >= maxAttempts) {
+    rec.lockedUntil = now + lockoutSeconds * 1000;
     return {
       allowed: false,
       remainingAttempts: 0,
-      retryAfterSeconds,
+      retryAfterSeconds: lockoutSeconds,
     };
   }
 
   return {
     allowed: true,
-    remainingAttempts: Math.max(0, MAX_ATTEMPTS - record.attempts),
+    remainingAttempts: Math.max(0, maxAttempts - rec.attempts),
   };
 }
 
-export function recordFailedAttempt(identifier: string): RateLimitResult {
-  const now = Date.now();
-  const record = rateLimitMap.get(identifier);
+/**
+ * Universal Atomic Rate Limiter powered by Supabase Postgres.
+ * Shared and synchronized across all Vercel Serverless Function instances.
+ */
+export async function enforceRateLimit(
+  key: string,
+  maxAttempts: number,
+  windowSeconds: number,
+  lockoutSeconds: number
+): Promise<RateLimitResult> {
+  if (!isSupabaseConfigured()) {
+    return fallbackRateLimit(key, maxAttempts, windowSeconds, lockoutSeconds);
+  }
 
-  if (!record || now - record.firstAttemptTime > WINDOW_MS) {
-    rateLimitMap.set(identifier, {
-      attempts: 1,
-      firstAttemptTime: now,
-      lastAttemptTime: now,
+  try {
+    const supabase = getServiceSupabase();
+    const { data, error } = await supabase.rpc("check_and_record_rate_limit", {
+      p_key: key,
+      p_max_attempts: maxAttempts,
+      p_window_seconds: windowSeconds,
+      p_lockout_seconds: lockoutSeconds,
     });
+
+    if (error || !data || data.length === 0) {
+      console.warn("Database rate limit RPC failed, using fallback:", error?.message);
+      return fallbackRateLimit(key, maxAttempts, windowSeconds, lockoutSeconds);
+    }
+
+    const row = data[0];
     return {
-      allowed: true,
-      remainingAttempts: MAX_ATTEMPTS - 1,
+      allowed: Boolean(row.allowed),
+      remainingAttempts: Number(row.remaining_attempts || 0),
+      retryAfterSeconds: Number(row.retry_after_seconds || 0),
     };
+  } catch (err) {
+    console.warn("Rate limit exception, falling back to memory:", err);
+    return fallbackRateLimit(key, maxAttempts, windowSeconds, lockoutSeconds);
   }
-
-  record.attempts += 1;
-  record.lastAttemptTime = now;
-
-  if (record.attempts >= MAX_ATTEMPTS) {
-    record.lockedUntil = now + LOCKOUT_MS;
-    return {
-      allowed: false,
-      remainingAttempts: 0,
-      retryAfterSeconds: Math.ceil(LOCKOUT_MS / 1000),
-    };
-  }
-
-  return {
-    allowed: true,
-    remainingAttempts: Math.max(0, MAX_ATTEMPTS - record.attempts),
-  };
 }
 
-export function resetRateLimit(identifier: string): void {
-  rateLimitMap.delete(identifier);
+/**
+ * Reset rate limit key (e.g. after successful password verification)
+ */
+export async function resetRateLimit(key: string): Promise<void> {
+  fallbackMemoryMap.delete(key);
+  if (!isSupabaseConfigured()) return;
+
+  try {
+    const supabase = getServiceSupabase();
+    await supabase.rpc("reset_rate_limit_key", { p_key: key });
+  } catch (err) {
+    console.warn("Failed to reset rate limit in database:", err);
+  }
+}
+
+/**
+ * 1. Password Attempt Rate Limit:
+ * 5 failed attempts per 5 minutes -> 10-minute lockout.
+ */
+export async function checkPasswordRateLimit(
+  ip: string,
+  code: string
+): Promise<RateLimitResult> {
+  const key = `pwd:${ip}:${code.toUpperCase()}`;
+  return enforceRateLimit(key, 5, 300, 600);
+}
+
+/**
+ * 2. Share Code Lookup Rate Limit (Anti-Enumeration):
+ * Max 25 lookups per 5 minutes per IP -> 5-minute cooldown.
+ */
+export async function checkCodeLookupRateLimit(ip: string): Promise<RateLimitResult> {
+  const key = `lookup:${ip}`;
+  return enforceRateLimit(key, 25, 300, 300);
+}
+
+/**
+ * 3. File Upload Rate Limit (Anti-DoS / Anti-Abuse):
+ * Max 5 uploads per 10 minutes per IP -> 10-minute cooldown.
+ */
+export async function checkUploadRateLimit(ip: string): Promise<RateLimitResult> {
+  const key = `upload:${ip}`;
+  return enforceRateLimit(key, 5, 600, 600);
 }
