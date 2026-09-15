@@ -35,7 +35,11 @@ export function getServiceSupabase(): SupabaseClient {
  * Checks if Supabase environment variables are properly configured
  */
 export function isSupabaseConfigured(): boolean {
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   return Boolean(
-    process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
+    process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      key &&
+      key !== "PASTE_YOUR_SERVICE_ROLE_KEY_HERE" &&
+      key.length > 20
   );
 }
