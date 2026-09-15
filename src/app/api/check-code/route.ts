@@ -23,9 +23,10 @@ export async function GET(req: NextRequest): Promise<NextResponse<CheckCodeRespo
 
     const supabase = getServiceSupabase();
 
+    // Query file record - notice original_filename is NOT returned to the client!
     const { data, error } = await supabase
       .from("files")
-      .select("id, file_path, original_filename, file_size, mime_type, expires_at")
+      .select("id, file_path, file_size, is_archive, file_count, expires_at")
       .eq("share_code", code)
       .maybeSingle();
 
@@ -57,11 +58,12 @@ export async function GET(req: NextRequest): Promise<NextResponse<CheckCodeRespo
       );
     }
 
+    // Return size, file count, and expiry — keeping file names strictly confidential until password is verified
     return NextResponse.json({
       success: true,
-      filename: data.original_filename,
       size: data.file_size,
-      mimeType: data.mime_type,
+      fileCount: data.file_count || 1,
+      isArchive: data.is_archive || false,
       expiresAt: data.expires_at,
     });
   } catch (err: unknown) {

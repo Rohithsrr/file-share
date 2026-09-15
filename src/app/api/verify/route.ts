@@ -129,11 +129,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
       );
     }
 
+    // Return the revealed filename and file manifest only after successful password verification
     return NextResponse.json({
       success: true,
       signedUrl: signedData.signedUrl,
       filename: fileRecord.original_filename,
       size: fileRecord.file_size,
+      fileCount: fileRecord.file_count || 1,
+      isArchive: fileRecord.is_archive || false,
+      filesManifest: fileRecord.files_manifest || [],
       expiresInSeconds: 60,
     });
   } catch (err: unknown) {

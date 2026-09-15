@@ -14,10 +14,13 @@ import {
   CheckCircle2,
   Lock,
   ArrowRight,
+  FolderArchive,
+  FileText,
+  Layers,
 } from "lucide-react";
 import { formatBytes } from "@/lib/utils";
 import ExpiryBadge from "./ExpiryBadge";
-import { CheckCodeResponse, VerifyResponse } from "@/lib/types";
+import { CheckCodeResponse, VerifyResponse, FileManifestItem } from "@/lib/types";
 
 export default function DownloadCard() {
   const searchParams = useSearchParams();
@@ -27,11 +30,15 @@ export default function DownloadCard() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
-  // File metadata retrieved after code check
+  // File metadata retrieved before password (filenames strictly omitted)
   const [fileMeta, setFileMeta] = useState<CheckCodeResponse | null>(null);
   const [isCheckingCode, setIsCheckingCode] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Decrypted results (revealed ONLY after password verification)
+  const [revealedFilename, setRevealedFilename] = useState<string | null>(null);
+  const [revealedManifest, setRevealedManifest] = useState<FileManifestItem[]>([]);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
   const [remainingAttempts, setRemainingAttempts] = useState<number | null>(null);
 
@@ -42,6 +49,8 @@ export default function DownloadCard() {
     setErrorMessage(null);
     setFileMeta(null);
     setDownloadSuccess(false);
+    setRevealedFilename(null);
+    setRevealedManifest([]);
 
     try {
       const res = await fetch(`/api/check-code?code=${encodeURIComponent(codeToCheck)}`);
@@ -61,7 +70,6 @@ export default function DownloadCard() {
     }
   }, []);
 
-  // Check code on load if provided in query params
   useEffect(() => {
     if (initialCode && initialCode.length === 6) {
       checkCode(initialCode.toUpperCase());
@@ -85,7 +93,7 @@ export default function DownloadCard() {
     }
 
     if (!password) {
-      setErrorMessage("Password is required to decrypt this file.");
+      setErrorMessage("Password is required to decrypt and reveal this file.");
       return;
     }
 
@@ -111,7 +119,11 @@ export default function DownloadCard() {
         throw new Error(data.error || "Password incorrect or verification failed.");
       }
 
-      // Download file seamlessly using signed URL
+      // Reveal filename & manifest only now!
+      setRevealedFilename(data.filename || "downloaded-file");
+      setRevealedManifest(data.filesManifest || []);
+
+      // Trigger automatic download
       const link = document.createElement("a");
       link.href = data.signedUrl;
       link.download = data.filename || "downloaded-file";
@@ -121,7 +133,7 @@ export default function DownloadCard() {
 
       setDownloadSuccess(true);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to download file.";
+      const msg = err instanceof Error ? err.message : "Failed to decrypt file.";
       setErrorMessage(msg);
     } finally {
       setIsVerifying(false);
@@ -138,7 +150,7 @@ export default function DownloadCard() {
           Retrieve Secure File
         </h2>
         <p className="text-sm text-slate-400 mt-1">
-          Enter the 6-character code and password to download.
+          Enter the 6-character code and password to decrypt and view file names.
         </p>
       </div>
 
@@ -179,34 +191,37 @@ export default function DownloadCard() {
         </div>
       </form>
 
-      {/* File Found Information */}
-      {fileMeta && fileMeta.success && (
+      {/* File Found Information (Filenames strictly HIDDEN until password verification) */}
+      {fileMeta && fileMeta.success && !downloadSuccess && (
         <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-4 mb-5 animate-in fade-in-50 duration-200">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-9 h-9 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center flex-shrink-0">
-                <FileCheck className="w-5 h-5" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-sm font-semibold text-slate-200 truncate">
-                  {fileMeta.filename}
-                </p>
-                <p className="text-xs text-slate-500">
-                  {fileMeta.size ? formatBytes(fileMeta.size) : "Encrypted File"}
-                </p>
-              </div>
+          <div className="flex items-center gap-3 mb-3">
+            <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 flex items-center justify-center flex-shrink-0">
+              <Lock className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-slate-200 flex items-center gap-1.5">
+                <span>Encrypted Protected Package</span>
+                {fileMeta.fileCount && fileMeta.fileCount > 1 && (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] bg-indigo-600/20 text-indigo-300 border border-indigo-500/30">
+                    {fileMeta.fileCount} Files
+                  </span>
+                )}
+              </p>
+              <p className="text-xs text-slate-400 font-mono">
+                {fileMeta.size ? formatBytes(fileMeta.size) : "Encrypted Data"} • Filenames hidden until verified
+              </p>
             </div>
           </div>
 
           {fileMeta.expiresAt && (
-            <div className="pt-2 border-t border-slate-800/80 flex justify-between items-center text-xs">
-              <span className="text-slate-400">Expiration Status:</span>
+            <div className="pt-2.5 border-t border-slate-800/80 flex justify-between items-center text-xs">
+              <span className="text-slate-400">Cloud Status:</span>
               <ExpiryBadge
                 expiresAt={fileMeta.expiresAt}
                 onExpired={() => {
                   setFileMeta(null);
                   setErrorMessage(
-                    "This file has just expired and was automatically deleted from cloud storage."
+                    "This file has expired and was automatically deleted from cloud storage."
                   );
                 }}
               />
@@ -240,7 +255,7 @@ export default function DownloadCard() {
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter password set by uploader"
+                placeholder="Enter password to reveal file names & download"
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl py-3 pl-4 pr-11 text-slate-200 text-sm placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 transition-all"
               />
               <button
@@ -265,28 +280,66 @@ export default function DownloadCard() {
             {isVerifying ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin text-white" />
-                <span>Verifying & Generating Secure Link...</span>
+                <span>Decrypting & Generating Secure Link...</span>
               </>
             ) : (
               <>
                 <Download className="w-4 h-4" />
-                <span>Verify Password & Download File</span>
+                <span>Verify Password & Download</span>
               </>
             )}
           </button>
         </form>
       )}
 
-      {/* Success Banner */}
-      {downloadSuccess && (
-        <div className="p-4 rounded-2xl bg-emerald-950/60 border border-emerald-600/40 text-emerald-300 text-sm space-y-2 animate-in fade-in-50">
-          <div className="flex items-center gap-2 font-bold text-emerald-200">
-            <CheckCircle2 className="w-5 h-5 text-emerald-400 flex-shrink-0" />
-            <span>Download Triggered Successfully!</span>
+      {/* REVEALED FILE NAMES & SUCCESS STATE (Only visible after password verification) */}
+      {downloadSuccess && revealedFilename && (
+        <div className="space-y-4 animate-in fade-in-50">
+          <div className="p-4 rounded-2xl bg-emerald-950/60 border border-emerald-600/40 text-emerald-300 text-sm space-y-2">
+            <div className="flex items-center gap-2 font-bold text-emerald-200">
+              <CheckCircle2 className="w-5 h-5 text-emerald-400 flex-shrink-0" />
+              <span>Password Verified & Download Triggered!</span>
+            </div>
+            <p className="text-xs text-emerald-300/80">
+              Your file names have been decrypted and your browser download has started via a 60-second secure temporary signed URL.
+            </p>
           </div>
-          <p className="text-xs text-emerald-300/80">
-            Your browser should automatically begin downloading the file via a 60-second temporary signed URL. If the download didn&apos;t start, please click verify again.
-          </p>
+
+          {/* Decrypted File Information */}
+          <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-4">
+            <p className="text-xs font-semibold uppercase tracking-wider text-indigo-400 mb-2 flex items-center gap-1.5">
+              <FileCheck className="w-4 h-4" /> Decrypted Package Name
+            </p>
+            <p className="text-sm font-bold text-slate-200 font-mono break-all mb-3">
+              {revealedFilename}
+            </p>
+
+            {/* List individual files inside the folder/bundle if manifest exists */}
+            {revealedManifest.length > 0 && (
+              <div className="pt-3 border-t border-slate-800/80">
+                <p className="text-xs font-semibold text-slate-400 mb-2 flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-slate-400" />
+                  Files in this package ({revealedManifest.length}):
+                </p>
+                <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                  {revealedManifest.map((item, idx) => (
+                    <div
+                      key={idx}
+                      className="p-2 rounded-lg bg-slate-900 border border-slate-800/60 flex items-center justify-between text-xs"
+                    >
+                      <span className="text-slate-300 truncate font-mono flex items-center gap-1.5">
+                        <FileText className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+                        {item.path || item.name}
+                      </span>
+                      <span className="text-slate-500 font-mono flex-shrink-0 ml-2">
+                        {formatBytes(item.size)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -301,7 +354,7 @@ export default function DownloadCard() {
       {/* Security note */}
       <div className="mt-6 pt-4 border-t border-slate-800 text-[11px] text-slate-500 flex items-center justify-center gap-1.5">
         <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
-        <span>Served exclusively via 60-second secure temporary signed URLs</span>
+        <span>File names and downloads are protected until password verification</span>
       </div>
     </div>
   );

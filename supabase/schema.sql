@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS public.files (
     file_size BIGINT NOT NULL,
     mime_type TEXT NOT NULL,
     password_hash TEXT NOT NULL,
+    is_archive BOOLEAN DEFAULT false,
+    file_count INTEGER DEFAULT 1,
+    files_manifest JSONB DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     expires_at TIMESTAMPTZ NOT NULL
 );
