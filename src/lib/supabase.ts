@@ -6,8 +6,8 @@ let serverClientInstance: SupabaseClient | null = null;
 
 /**
  * Returns a Supabase client for server-side operations (Route Handlers & Server Actions).
- * Automatically uses SUPABASE_SERVICE_ROLE_KEY if provided, or falls back to
- * NEXT_PUBLIC_SUPABASE_ANON_KEY with backend RLS policies.
+ * Uses SUPABASE_SERVICE_ROLE_KEY if provided, otherwise falls back to
+ * NEXT_PUBLIC_SUPABASE_ANON_KEY.
  */
 export function getServiceSupabase(): SupabaseClient {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -19,7 +19,7 @@ export function getServiceSupabase(): SupabaseClient {
 
   if (!supabaseUrl || !serviceKey) {
     throw new Error(
-      "Missing Supabase configuration. Please check NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY in .env.local"
+      "Missing Supabase configuration. Please check NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local"
     );
   }
 
@@ -28,6 +28,11 @@ export function getServiceSupabase(): SupabaseClient {
       auth: {
         persistSession: false,
         autoRefreshToken: false,
+      },
+      global: {
+        headers: process.env.CRON_SECRET
+          ? { "x-server-auth": process.env.CRON_SECRET }
+          : {},
       },
     });
   }

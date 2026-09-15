@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { getServiceSupabase, STORAGE_BUCKET, isSupabaseConfigured } from "@/lib/supabase";
 import { checkPasswordRateLimit, resetRateLimit } from "@/lib/rate-limit";
 import { getClientIp, validateSameOrigin } from "@/lib/security";
+import { isValidShareId } from "@/lib/utils";
 import { VerifyResponse } from "@/lib/types";
 
 export async function POST(req: NextRequest): Promise<NextResponse<VerifyResponse>> {
@@ -30,12 +31,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
       );
     }
 
-    const code = (body.code as string | undefined)?.trim().toUpperCase();
+    const shareId = (body.id || body.code as string | undefined)?.trim();
     const password = body.password as string | undefined;
 
-    if (!code || code.length !== 6) {
+    if (!shareId || !isValidShareId(shareId)) {
       return NextResponse.json(
-        { success: false, error: "Please provide a valid 6-character share code." },
+        { success: false, error: "Please provide a valid Share ID." },
         { status: 400 }
       );
     }
@@ -47,10 +48,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
       );
     }
 
-    // 2. Distributed Database-Backed Rate Limiting (Synchronized across all serverless lambdas)
+    // 2. Distributed Database-Backed Rate Limiting
     const clientIp = getClientIp(req);
-    const rateLimitKey = `pwd:${clientIp}:${code}`;
-    const rateStatus = await checkPasswordRateLimit(clientIp, code);
+    const rateLimitKey = `pwd:${clientIp}:${shareId}`;
+    const rateStatus = await checkPasswordRateLimit(clientIp, shareId);
 
     if (!rateStatus.allowed) {
       return NextResponse.json(
@@ -69,12 +70,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
     const { data: fileRecord, error: dbError } = await supabase
       .from("files")
       .select("*")
-      .eq("share_code", code)
+      .eq("share_code", shareId)
       .maybeSingle();
 
     if (dbError || !fileRecord) {
       return NextResponse.json(
-        { success: false, error: "Share code not found or invalid." },
+        { success: false, error: "Share ID not found or invalid." },
         { status: 404 }
       );
     }
@@ -84,7 +85,6 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
     const now = Date.now();
 
     if (expiresAt < now) {
-      // Purge expired file immediately
       await Promise.allSettled([
         supabase.storage.from(STORAGE_BUCKET).remove([fileRecord.file_path]),
         supabase.from("files").delete().eq("id", fileRecord.id),
@@ -118,7 +118,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<VerifyRespons
       );
     }
 
-    // Password is valid: reset rate limit tracking for this IP + code
+    // Password is valid: reset rate limit tracking for this IP + share ID
     await resetRateLimit(rateLimitKey);
 
     // Generate secure temporary signed URL (valid for 60 seconds)

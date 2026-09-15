@@ -3,10 +3,11 @@ import { getServiceSupabase, STORAGE_BUCKET, isSupabaseConfigured } from "@/lib/
 import { CheckCodeResponse } from "@/lib/types";
 import { checkCodeLookupRateLimit } from "@/lib/rate-limit";
 import { getClientIp } from "@/lib/security";
+import { isValidShareId } from "@/lib/utils";
 
 export async function GET(req: NextRequest): Promise<NextResponse<CheckCodeResponse>> {
   try {
-    // 1. Anti-Enumeration Rate Limiting (Protects 6-character code space against brute-force scanners)
+    // 1. Anti-Enumeration Rate Limiting
     const clientIp = getClientIp(req);
     const rateStatus = await checkCodeLookupRateLimit(clientIp);
 
@@ -14,7 +15,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<CheckCodeRespo
       return NextResponse.json(
         {
           success: false,
-          error: `Too many code lookup requests. Potential automated scan detected. Please wait ${rateStatus.retryAfterSeconds} seconds.`,
+          error: `Too many lookup requests. Potential automated scan detected. Please wait ${rateStatus.retryAfterSeconds} seconds.`,
         },
         { status: 429 }
       );
@@ -28,11 +29,12 @@ export async function GET(req: NextRequest): Promise<NextResponse<CheckCodeRespo
     }
 
     const { searchParams } = new URL(req.url);
-    const code = searchParams.get("code")?.trim().toUpperCase();
+    const idParam = searchParams.get("id") || searchParams.get("code");
+    const shareId = idParam?.trim();
 
-    if (!code || code.length !== 6) {
+    if (!shareId || !isValidShareId(shareId)) {
       return NextResponse.json(
-        { success: false, error: "Please provide a valid 6-character share code." },
+        { success: false, error: "Please provide a valid Share ID." },
         { status: 400 }
       );
     }
@@ -43,12 +45,12 @@ export async function GET(req: NextRequest): Promise<NextResponse<CheckCodeRespo
     const { data, error } = await supabase
       .from("files")
       .select("id, file_path, file_size, is_archive, file_count, expires_at")
-      .eq("share_code", code)
+      .eq("share_code", shareId)
       .maybeSingle();
 
     if (error || !data) {
       return NextResponse.json(
-        { success: false, error: "Share code not found or invalid." },
+        { success: false, error: "Share ID not found or invalid." },
         { status: 404 }
       );
     }

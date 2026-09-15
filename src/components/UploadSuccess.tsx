@@ -105,18 +105,18 @@ export default function UploadSuccess({
       <div className="space-y-4">
         <div>
           <label className="text-xs font-semibold uppercase tracking-wider text-indigo-300 mb-1.5 block">
-            6-Character Share Code
+            128-Bit Cryptographic Share ID
           </label>
           <div className="flex items-center gap-2">
-            <div className="flex-1 bg-slate-950 border-2 border-indigo-500/40 rounded-xl py-3 px-4 text-center">
-              <span className="font-mono text-3xl font-extrabold tracking-widest text-indigo-400 selection:bg-indigo-500/30">
+            <div className="flex-1 bg-slate-950 border-2 border-indigo-500/40 rounded-xl py-3 px-3.5 text-center overflow-hidden">
+              <span className="font-mono text-sm sm:text-base font-bold tracking-wider text-indigo-400 selection:bg-indigo-500/30 break-all select-all">
                 {shareCode}
               </span>
             </div>
             <button
               onClick={handleCopyCode}
               type="button"
-              className="h-[62px] px-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-medium transition-all flex items-center gap-2 shadow-lg shadow-indigo-600/25 active:scale-95"
+              className="h-[52px] px-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-medium transition-all flex items-center gap-2 shadow-lg shadow-indigo-600/25 active:scale-95 flex-shrink-0"
             >
               {copiedCode ? (
                 <>

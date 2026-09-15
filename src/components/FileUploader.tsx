@@ -18,7 +18,7 @@ import {
   Sparkles,
   Layers,
 } from "lucide-react";
-import { formatBytes, generateShareCode, isValidShareCode } from "@/lib/utils";
+import { formatBytes, generateShareId, isValidShareId } from "@/lib/utils";
 import { UploadResponse, FileManifestItem } from "@/lib/types";
 
 interface FileUploaderProps {
@@ -192,7 +192,7 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
   };
 
   const handleGenerateRandomCode = () => {
-    setCustomCode(generateShareCode());
+    setCustomCode(generateShareId());
     setUseCustomCode(true);
   };
 
@@ -211,8 +211,8 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
     }
 
     if (useCustomCode && customCode) {
-      if (!isValidShareCode(customCode)) {
-        setErrorMessage("Custom secret code must be exactly 6 alphanumeric characters (A-Z, 0-9).");
+      if (!isValidShareId(customCode)) {
+        setErrorMessage("Custom secret code must be between 6 and 64 alphanumeric characters.");
         return;
       }
     }
@@ -466,29 +466,21 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
           <div className="flex items-center justify-between mb-2">
             <label className="text-sm font-semibold text-slate-200 flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-              Secret Code <span className="text-slate-500 font-normal">(Optional)</span>
+              Custom Secret Code <span className="text-slate-500 font-normal">(Optional)</span>
             </label>
-            <button
-              type="button"
-              onClick={handleGenerateRandomCode}
-              className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-medium transition-colors"
-            >
-              <Dices className="w-3.5 h-3.5" />
-              <span>Generate Random</span>
-            </button>
           </div>
 
           <div className="flex items-center gap-2">
             <input
               type="text"
-              maxLength={6}
+              maxLength={64}
               value={customCode}
               onChange={(e) => {
-                setCustomCode(e.target.value.toUpperCase());
+                setCustomCode(e.target.value.trim());
                 setUseCustomCode(true);
               }}
-              placeholder="e.g. 8K2M9Z (Leave blank to auto-generate)"
-              className="flex-1 bg-slate-950 border border-slate-800 rounded-xl py-3 px-4 text-slate-200 text-sm font-mono tracking-wider placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 transition-all uppercase"
+              placeholder="Leave blank to auto-generate 128-bit cryptographic ID"
+              className="flex-1 bg-slate-950 border border-slate-800 rounded-xl py-3 px-4 text-slate-200 text-sm font-mono tracking-wider placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 transition-all"
             />
             {customCode && (
               <button
@@ -504,6 +496,9 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
               </button>
             )}
           </div>
+          <p className="text-[11px] text-slate-500 mt-1">
+            Default: 128-bit cryptographically random token (search space: 2¹²⁸, completely unguessable).
+          </p>
         </div>
 
         {/* Expiration Time Selector */}

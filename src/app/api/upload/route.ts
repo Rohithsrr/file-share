@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { getServiceSupabase, STORAGE_BUCKET, isSupabaseConfigured } from "@/lib/supabase";
-import { generateShareCode, isValidShareCode, sanitizeFilename } from "@/lib/utils";
+import { generateShareId, isValidShareId, sanitizeFilename } from "@/lib/utils";
 import { UploadResponse, FileManifestItem } from "@/lib/types";
 import { checkUploadRateLimit } from "@/lib/rate-limit";
 import {
@@ -10,10 +10,9 @@ import {
   getClientIp,
   validateSameOrigin,
 } from "@/lib/security";
+import { validateFileContent } from "@/lib/magic-bytes";
 
-// Maximum single upload file size: 50MB (Supabase Free Tier standard limit)
 const MAX_SINGLE_UPLOAD_BYTES = 50 * 1024 * 1024;
-// Maximum total active storage on Supabase free tier: 950MB (safe headroom below 1GB)
 const MAX_FREE_TIER_STORAGE_BYTES = 950 * 1024 * 1024;
 
 export async function POST(req: NextRequest): Promise<NextResponse<UploadResponse>> {
@@ -26,7 +25,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       );
     }
 
-    // 2. Client IP Rate Limiting (Anti-DoS / Upload Spam Prevention)
+    // 2. Client IP Rate Limiting (Anti-DoS)
     const clientIp = getClientIp(req);
     const rateLimit = await checkUploadRateLimit(clientIp);
     if (!rateLimit.allowed) {
@@ -67,7 +66,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       }
     }
 
-    // 3. File Validation
+    // 3. File presence & size validation
     if (!file || file.size === 0) {
       return NextResponse.json(
         { success: false, error: "Please select a valid file or folder to upload." },
@@ -85,7 +84,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       );
     }
 
-    // 4. Dangerous Extension & Malware Staging Filter
+    // 4. File extension blacklist
     if (isDangerousExtension(file.name)) {
       return NextResponse.json(
         {
@@ -96,7 +95,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       );
     }
 
-    // 5. Zip-Bomb & Decompression Protection
+    // 5. Deep File Signature / Magic Bytes Validation
+    // Catches malicious.exe renamed to photo.jpg or report.pdf
+    const fileBuffer = Buffer.from(await file.arrayBuffer());
+    const magicResult = validateFileContent(fileBuffer, file.name);
+    if (!magicResult.valid) {
+      return NextResponse.json(
+        { success: false, error: magicResult.error },
+        { status: 400 }
+      );
+    }
+
+    // 6. Zip-Bomb & Decompression Protection
     if (isArchive && filesManifest.length > 0) {
       const archiveCheck = validateArchiveManifest(filesManifest, file.size);
       if (!archiveCheck.valid) {
@@ -107,7 +117,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       }
     }
 
-    // 6. Strong Password Validation
+    // 7. Password Validation
     if (!password || password.length < 4) {
       return NextResponse.json(
         { success: false, error: "A password with at least 4 characters is required to protect your file." },
@@ -118,7 +128,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
     const supabase = getServiceSupabase();
     const nowIso = new Date().toISOString();
 
-    // 7. Opportunistic Free-Tier Cleanup
+    // 8. Opportunistic Cleanup
     try {
       const { data: expired } = await supabase
         .from("files")
@@ -134,10 +144,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
         ]);
       }
     } catch {
-      // Non-blocking cleanup
+      // Non-blocking
     }
 
-    // 8. Storage Capacity Check
+    // 9. Storage Capacity Check
     const { data: activeFiles } = await supabase
       .from("files")
       .select("file_size")
@@ -159,7 +169,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       );
     }
 
-    // Expiration duration (default 5 minutes)
+    // Expiration duration
     let durationMinutes = 5;
     if (durationMinutesRaw) {
       const parsed = parseInt(durationMinutesRaw, 10);
@@ -169,13 +179,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
     }
     const expiresAt = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
 
-    // Determine share code
-    let shareCode: string;
+    // 10. Cryptographically Strong 128-Bit Share ID Generation (or sanitized custom code)
+    let shareId: string;
     if (customCode) {
-      const normalizedCode = customCode.toUpperCase();
-      if (!isValidShareCode(normalizedCode)) {
+      const normalized = customCode.trim();
+      if (!isValidShareId(normalized)) {
         return NextResponse.json(
-          { success: false, error: "Custom secret code must be exactly 6 alphanumeric characters." },
+          { success: false, error: "Custom secret code must be between 6 and 64 alphanumeric characters." },
           { status: 400 }
         );
       }
@@ -183,7 +193,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       const { data: existing } = await supabase
         .from("files")
         .select("id")
-        .eq("share_code", normalizedCode)
+        .eq("share_code", normalized)
         .maybeSingle();
 
       if (existing) {
@@ -192,12 +202,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
           { status: 409 }
         );
       }
-      shareCode = normalizedCode;
+      shareId = normalized;
     } else {
+      // 128-bit cryptographically secure random token (32 hex characters)
       let attempts = 0;
-      let uniqueCode = "";
+      let uniqueId = "";
       while (attempts < 5) {
-        const candidate = generateShareCode();
+        const candidate = generateShareId();
         const { data: existing } = await supabase
           .from("files")
           .select("id")
@@ -205,30 +216,30 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
           .maybeSingle();
 
         if (!existing) {
-          uniqueCode = candidate;
+          uniqueId = candidate;
           break;
         }
         attempts++;
       }
 
-      if (!uniqueCode) {
+      if (!uniqueId) {
         return NextResponse.json(
-          { success: false, error: "Could not generate a unique share code. Please try again." },
+          { success: false, error: "Could not generate a unique share ID. Please try again." },
           { status: 500 }
         );
       }
-      shareCode = uniqueCode;
+      shareId = uniqueId;
     }
 
-    // 9. Bcrypt password hashing (10 salt rounds)
+    // 11. Bcrypt password hashing
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    // 10. Sanitize filename and storage path
+    // 12. Sanitize filename and storage path
     const safeFilename = sanitizeFilename(file.name);
-    const storagePath = `${shareCode}/${Date.now()}_${safeFilename}`;
+    const storagePath = `${shareId}/${Date.now()}_${safeFilename}`;
 
-    // Force application/octet-stream for potentially scriptable formats to neutralize XSS
+    // Force application/octet-stream for potentially scriptable formats
     let safeMimeType = file.type || "application/octet-stream";
     const lowerName = file.name.toLowerCase();
     if (
@@ -242,7 +253,6 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
     }
 
     // Upload to Supabase private storage
-    const fileBuffer = Buffer.from(await file.arrayBuffer());
     const { error: storageError } = await supabase.storage
       .from(STORAGE_BUCKET)
       .upload(storagePath, fileBuffer, {
@@ -260,7 +270,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
 
     // Insert metadata record
     const { error: dbError } = await supabase.from("files").insert({
-      share_code: shareCode,
+      share_code: shareId,
       file_path: storagePath,
       original_filename: file.name,
       file_size: file.size,
@@ -283,11 +293,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
 
     const host = req.headers.get("host") || "localhost:3000";
     const protocol = host.includes("localhost") ? "http" : "https";
-    const downloadUrl = `${protocol}://${host}/download?code=${shareCode}`;
+    const downloadUrl = `${protocol}://${host}/download?id=${shareId}`;
 
     return NextResponse.json({
       success: true,
-      shareCode,
+      shareCode: shareId,
       downloadUrl,
       expiresAt,
       filename: file.name,

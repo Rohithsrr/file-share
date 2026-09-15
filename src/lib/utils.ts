@@ -6,25 +6,39 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
- * Generate a random 6-character alphanumeric code
- * Uses unambiguous uppercase characters & digits (omitting easily confused 0/O, 1/I)
+ * Generate a 128-bit cryptographically secure random Share ID
+ * 16 bytes = 128 bits of true entropy = 32 hexadecimal characters
+ * Search space: 2^128 (~3.4 x 10^38), physically impossible to enumerate.
+ * Uses Web Crypto API (supported natively in both Node.js 18+ and modern browsers).
  */
-export function generateShareCode(): string {
-  const chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+export function generateShareId(): string {
+  if (typeof globalThis !== "undefined" && globalThis.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  // Fallback for unexpected headless environments
+  const chars = "0123456789abcdef";
   let result = "";
-  for (let i = 0; i < 6; i++) {
-    const randomIndex = Math.floor(Math.random() * chars.length);
-    result += chars[randomIndex];
+  for (let i = 0; i < 32; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)];
   }
   return result;
 }
 
+// Backward compatibility aliases
+export const generateShareCode = generateShareId;
+
 /**
- * Validates a custom 6-character code
+ * Validates a share ID (128-bit hex string or custom alphanumeric code up to 64 chars)
  */
-export function isValidShareCode(code: string): boolean {
-  return /^[a-zA-Z0-9]{6}$/.test(code);
+export function isValidShareId(id: string): boolean {
+  if (!id) return false;
+  // Standard 128-bit hex token (32 chars) or custom alphanumeric code (6 to 64 chars)
+  return /^[a-zA-Z0-9_-]{6,64}$/.test(id);
 }
+
+export const isValidShareCode = isValidShareId;
 
 /**
  * Format raw bytes into human readable format (KB, MB, GB)
@@ -42,7 +56,6 @@ export function formatBytes(bytes: number, decimals: number = 2): string {
  * Sanitize filename to prevent directory traversal and special character issues
  */
 export function sanitizeFilename(filename: string): string {
-  // Remove directory separators and null bytes
   const cleanName = filename.replace(/[/\\?%*:|"<>]/g, "-").trim();
   return cleanName || "unnamed_file";
 }
